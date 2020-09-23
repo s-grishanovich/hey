@@ -157,7 +157,6 @@ func main() {
 
 	if bodyEachLineFile != nil {
 		var bodyData = createBody(bodyEachLineFile)
-		//fmt.Println("bodies", string(bodyData))
 		var bodiesList = bytes.Split(bodyData, []byte("\n"))
 		var lenBodiesList = len(bodiesList)
 		if lenBodiesList == 0 {
@@ -171,11 +170,8 @@ func main() {
 			if lenBodiesList == i {
 				i = 0
 			}
-
-			//fmt.Println("Body ", i, "=", string(bodiesList[i]))
 			var req = createRequest(bodiesList[i])
 			i++
-
 			return req
 		}
 

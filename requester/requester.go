@@ -57,6 +57,12 @@ type Work struct {
 	// Request and RequestData are cloned for each request.
 	RequestFunc func() *http.Request
 
+	// ServerName (Host)
+	ServerName string
+
+	// Print progress each Progress result is done (0 - disabled)
+	Progress int
+
 	// N is the total number of requests to make.
 	N int
 
@@ -120,7 +126,7 @@ func (b *Work) Init() {
 func (b *Work) Run() {
 	b.Init()
 	b.start = now()
-	b.report = newReport(b.writer(), b.results, b.Output, b.N)
+	b.report = newReport(b.writer(), b.results, b.Output, b.N, b.Progress)
 	// Run the reporter first, it polls the result channel until it is closed.
 	go func() {
 		runReporter(b.report)
@@ -238,7 +244,7 @@ func (b *Work) runWorkers() {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         b.Request.Host,
+			ServerName:         b.ServerName,
 		},
 		MaxIdleConnsPerHost: min(b.C, maxIdleConn),
 		DisableCompression:  b.DisableCompression,

@@ -16,6 +16,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -39,22 +40,25 @@ const (
 )
 
 var (
-	m           = flag.String("m", "GET", "")
-	headers     = flag.String("h", "", "")
-	body        = flag.String("d", "", "")
-	bodyFile    = flag.String("D", "", "")
-	accept      = flag.String("A", "", "")
-	contentType = flag.String("T", "text/html", "")
-	authHeader  = flag.String("a", "", "")
-	hostHeader  = flag.String("host", "", "")
+	m                = flag.String("m", "GET", "")
+	headers          = flag.String("h", "", "")
+	body             = flag.String("d", "", "")
+	bodyFile         = flag.String("D", "", "")
+	bodyEachLineFile = flag.String("L", "", "")
+	accept           = flag.String("A", "", "")
+	contentType      = flag.String("T", "text/html", "")
+	authHeader       = flag.String("a", "", "")
+	hostHeader       = flag.String("host", "", "")
+	hs               headerSlice
 
 	output = flag.String("o", "", "")
 
-	c = flag.Int("c", 50, "")
-	n = flag.Int("n", 200, "")
-	q = flag.Float64("q", 0, "")
-	t = flag.Int("t", 20, "")
-	z = flag.Duration("z", 0, "")
+	c        = flag.Int("c", 50, "")
+	n        = flag.Int("n", 200, "")
+	q        = flag.Float64("q", 0, "")
+	t        = flag.Int("t", 20, "")
+	z        = flag.Duration("z", 0, "")
+	progress = flag.Int("p", 0, "")
 
 	h2   = flag.Bool("h2", false, "")
 	cpus = flag.Int("cpus", runtime.GOMAXPROCS(-1), "")
@@ -83,9 +87,11 @@ Options:
   -H  Custom HTTP header. You can specify as many as needed by repeating the flag.
       For example, -H "Accept: text/html" -H "Content-Type: application/xml" .
   -t  Timeout for each request in seconds. Default is 20, use 0 for infinite.
+  -p  Print count of finished requests (Default 0 - disabled, p greater than zero mean print info each p done requests)
   -A  HTTP Accept header.
   -d  HTTP request body.
   -D  HTTP request body from file. For example, /home/user/file.txt or ./file.txt.
+  -L  HTTP request body from file, loop over each line of file and use it as different requests body. For example, /home/user/file.txt or ./file.txt.
   -T  Content-type, defaults to "text/html".
   -a  Basic authentication, username:password.
   -x  HTTP Proxy address as host:port.
@@ -101,12 +107,13 @@ Options:
                         (default for current machine is %d cores)
 `
 
+type ReqFunc func() *http.Request
+
 func main() {
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, fmt.Sprintf(usage, runtime.NumCPU()))
 	}
 
-	var hs headerSlice
 	flag.Var(&hs, "H", "")
 
 	flag.Parse()
@@ -135,6 +142,83 @@ func main() {
 		}
 	}
 
+	var proxyURL *gourl.URL
+	if *proxyAddr != "" {
+		var err error
+		proxyURL, err = gourl.Parse(*proxyAddr)
+		if err != nil {
+			usageAndExit(err.Error())
+		}
+	}
+
+	var reqFun ReqFunc
+	var rbody []byte
+	var req *http.Request
+
+	if bodyEachLineFile != nil {
+		var bodyData = createBody(bodyEachLineFile)
+		//fmt.Println("bodies", string(bodyData))
+		var bodiesList = bytes.Split(bodyData, []byte("\n"))
+		var lenBodiesList = len(bodiesList)
+		if lenBodiesList == 0 {
+			usageAndExit("Empty lines")
+		}
+
+		fmt.Println("Bodies count", lenBodiesList)
+
+		var i = 0
+		reqFun = func() *http.Request {
+			if lenBodiesList == i {
+				i = 0
+			}
+
+			//fmt.Println("Body ", i, "=", string(bodiesList[i]))
+			var req = createRequest(bodiesList[i])
+			i++
+
+			return req
+		}
+
+	} else {
+		rbody = createBody(bodyFile)
+		req = createRequest(rbody)
+	}
+
+	w := &requester.Work{
+		Request:            req,
+		RequestBody:        rbody,
+		RequestFunc:        reqFun,
+		ServerName:         *hostHeader,
+		Progress:           *progress,
+		N:                  num,
+		C:                  conc,
+		QPS:                q,
+		Timeout:            *t,
+		DisableCompression: *disableCompression,
+		DisableKeepAlives:  *disableKeepAlives,
+		DisableRedirects:   *disableRedirects,
+		H2:                 *h2,
+		ProxyAddr:          proxyURL,
+		Output:             *output,
+	}
+	w.Init()
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		<-c
+		w.Stop()
+	}()
+	if dur > 0 {
+		go func() {
+			time.Sleep(dur)
+			w.Stop()
+		}()
+	}
+	w.Run()
+}
+
+func createRequest(body []byte) *http.Request {
 	url := flag.Args()[0]
 	method := strings.ToUpper(*m)
 
@@ -168,32 +252,13 @@ func main() {
 		username, password = match[1], match[2]
 	}
 
-	var bodyAll []byte
-	if *body != "" {
-		bodyAll = []byte(*body)
-	}
-	if *bodyFile != "" {
-		slurp, err := ioutil.ReadFile(*bodyFile)
-		if err != nil {
-			errAndExit(err.Error())
-		}
-		bodyAll = slurp
-	}
-
-	var proxyURL *gourl.URL
-	if *proxyAddr != "" {
-		var err error
-		proxyURL, err = gourl.Parse(*proxyAddr)
-		if err != nil {
-			usageAndExit(err.Error())
-		}
-	}
-
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
 		usageAndExit(err.Error())
 	}
-	req.ContentLength = int64(len(bodyAll))
+	req.ContentLength = int64(len(body))
+	req.Body = ioutil.NopCloser(bytes.NewReader(body))
+
 	if username != "" || password != "" {
 		req.SetBasicAuth(username, password)
 	}
@@ -212,35 +277,23 @@ func main() {
 	header.Set("User-Agent", ua)
 	req.Header = header
 
-	w := &requester.Work{
-		Request:            req,
-		RequestBody:        bodyAll,
-		N:                  num,
-		C:                  conc,
-		QPS:                q,
-		Timeout:            *t,
-		DisableCompression: *disableCompression,
-		DisableKeepAlives:  *disableKeepAlives,
-		DisableRedirects:   *disableRedirects,
-		H2:                 *h2,
-		ProxyAddr:          proxyURL,
-		Output:             *output,
-	}
-	w.Init()
+	return req
+}
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	go func() {
-		<-c
-		w.Stop()
-	}()
-	if dur > 0 {
-		go func() {
-			time.Sleep(dur)
-			w.Stop()
-		}()
+func createBody(bodyFile *string) []byte {
+	var bodyData []byte
+	if *body != "" {
+		bodyData = []byte(*body)
 	}
-	w.Run()
+	if *bodyFile != "" {
+		slurp, err := ioutil.ReadFile(*bodyFile)
+		if err != nil {
+			errAndExit(err.Error())
+		}
+		bodyData = slurp
+	}
+
+	return bodyData
 }
 
 func errAndExit(msg string) {

@@ -49,6 +49,7 @@ type report struct {
 	delayLats   []float64
 	offsets     []float64
 	statusCodes []int
+	progress    int64
 
 	results chan *result
 	done    chan bool
@@ -63,7 +64,7 @@ type report struct {
 	w io.Writer
 }
 
-func newReport(w io.Writer, results chan *result, output string, n int) *report {
+func newReport(w io.Writer, results chan *result, output string, n, progress int) *report {
 	cap := min(n, maxRes)
 	return &report{
 		output:      output,
@@ -78,6 +79,7 @@ func newReport(w io.Writer, results chan *result, output string, n int) *report 
 		delayLats:   make([]float64, 0, cap),
 		lats:        make([]float64, 0, cap),
 		statusCodes: make([]int, 0, cap),
+		progress:    int64(progress),
 	}
 }
 
@@ -85,6 +87,9 @@ func runReporter(r *report) {
 	// Loop will continue until channel is closed
 	for res := range r.results {
 		r.numRes++
+		if r.progress > 0 && r.numRes%r.progress == 0 {
+			fmt.Println("... done", r.numRes)
+		}
 		if res.err != nil {
 			r.errorDist[res.err.Error()]++
 		} else {
@@ -109,6 +114,11 @@ func runReporter(r *report) {
 			}
 		}
 	}
+
+	if r.progress > 0 {
+		fmt.Println("Done", r.numRes)
+	}
+
 	// Signal reporter is done.
 	r.done <- true
 }
